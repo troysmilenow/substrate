@@ -113,8 +113,8 @@ pub type DbHash = sp_core::H256;
 /// This is used as block body when storage-chain mode is enabled.
 #[derive(Debug, Encode, Decode)]
 struct ExtrinsicHeader {
-	/// Hash of the indexed part
-	indexed_hash: DbHash, // Zero hash if there's no indexed data
+	/// Hash of the indexed part, if any
+	indexed_hash: Option<DbHash>,
 	/// The rest of the data.
 	data: Vec<u8>,
 }
@@ -576,7 +576,7 @@ impl<Block: BlockT> sc_client_api::blockchain::Backend<Block> for BlockchainDb<B
 						let extrinsics: ClientResult<Vec<Block::Extrinsic>> = index
 							.into_iter()
 							.map(|ExtrinsicHeader { indexed_hash, data }| {
-								let decode_result = if indexed_hash != Default::default() {
+								let decode_result = if let Some(indexed_hash) = indexed_hash {
 									match self.db.get(columns::TRANSACTION, indexed_hash.as_ref()) {
 										Some(t) => {
 											let mut input =
@@ -658,7 +658,7 @@ impl<Block: BlockT> sc_client_api::blockchain::Backend<Block> for BlockchainDb<B
 					Ok(index) => {
 						let mut transactions = Vec::new();
 						for ExtrinsicHeader { indexed_hash, .. } in index.into_iter() {
-							if indexed_hash != Default::default() {
+							if let Some(indexed_hash) = indexed_hash {
 								match self.db.get(columns::TRANSACTION, indexed_hash.as_ref()) {
 									Some(t) => transactions.push(t),
 									None =>
@@ -1319,6 +1319,37 @@ impl<Block: BlockT> Backend<Block> {
 				match self.transaction_storage {
 					TransactionStorageMode::BlockBody => {
 						transaction.set_from_vec(columns::BODY, &lookup_key, body.encode());
+						// Store indexed data.
+						let mut hashes = Vec::new();
+						for op in operation.index_ops {
+							match op {
+								IndexOperation::Insert { extrinsic, hash, size } => {
+									let hash = DbHash::from_slice(hash.as_ref());
+									let extrinsic = body[extrinsic as usize].encode();
+									if size as usize <= extrinsic.len() {
+										let offset = extrinsic.len() - size as usize;
+										transaction.store(
+											columns::TRANSACTION,
+											hash,
+											extrinsic[offset..].to_vec(),
+										);
+										hashes.push(hash);
+									} else {
+										debug!(target: "db", "Commit: ignored incorrect index.");
+									}
+								},
+								IndexOperation::Renew { .. } => {
+									debug!(target: "db", "Commit: ignored indexed data renew.");
+								},
+							}
+						}
+						if !hashes.is_empty() {
+							transaction.set_from_vec(
+								columns::TRANSACTION,
+								&lookup_key,
+								hashes.encode(),
+							);
+						}
 					},
 					TransactionStorageMode::StorageChain => {
 						let body =
@@ -1672,7 +1703,7 @@ impl<Block: BlockT> Backend<Block> {
 				let mut hash = h.clone();
 				// Follow displaced chains back until we reach a finalized block.
 				// Since leaves are discarded due to finality, they can't have parents
-				// that are canonical, but not yet finalized. So we stop deletig as soon as
+				// that are canonical, but not yet finalized. So we stop deleting as soon as
 				// we reach canonical chain.
 				while self.blockchain.hash(number)? != Some(hash.clone()) {
 					let id = BlockId::<Block>::hash(hash.clone());
@@ -1706,12 +1737,38 @@ impl<Block: BlockT> Backend<Block> {
 					id,
 				)?;
 				match self.transaction_storage {
-					TransactionStorageMode::BlockBody => {},
+					TransactionStorageMode::BlockBody => {
+						if let Some(hashes) = read_db(
+							&*self.storage.db,
+							columns::KEY_LOOKUP,
+							columns::TRANSACTION,
+							id,
+						)? {
+							match Vec::<DbHash>::decode(&mut &hashes[..]) {
+								Ok(hashes) =>
+									for hash in hashes {
+										transaction.release(columns::TRANSACTION, hash);
+									},
+								Err(err) =>
+									return Err(sp_blockchain::Error::Backend(format!(
+										"Error decoding indexed hash list: {}",
+										err
+									))),
+							}
+							utils::remove_from_db(
+								transaction,
+								&*self.storage.db,
+								columns::KEY_LOOKUP,
+								columns::TRANSACTION,
+								id,
+							)?;
+						}
+					},
 					TransactionStorageMode::StorageChain => {
 						match Vec::<ExtrinsicHeader>::decode(&mut &body[..]) {
 							Ok(body) =>
 								for ExtrinsicHeader { indexed_hash, .. } in body {
-									if indexed_hash != Default::default() {
+									if let Some(indexed_hash) = indexed_hash {
 										transaction.release(columns::TRANSACTION, indexed_hash);
 									}
 								},
@@ -1784,7 +1841,7 @@ fn apply_index_ops<Block: BlockT>(
 		let extrinsic_header = if let Some(hash) = renewed_map.get(&(index as u32)) {
 			// Bump ref counter
 			transaction.reference(columns::TRANSACTION, DbHash::from_slice(hash.as_ref()));
-			ExtrinsicHeader { indexed_hash: hash.clone(), data: extrinsic }
+			ExtrinsicHeader { indexed_hash: Some(hash.clone()), data: extrinsic }
 		} else {
 			match index_map.get(&(index as u32)) {
 				Some((hash, size)) if *size as usize <= extrinsic.len() => {
@@ -1795,11 +1852,11 @@ fn apply_index_ops<Block: BlockT>(
 						extrinsic[offset..].to_vec(),
 					);
 					ExtrinsicHeader {
-						indexed_hash: DbHash::from_slice(hash.as_ref()),
+						indexed_hash: Some(DbHash::from_slice(hash.as_ref())),
 						data: extrinsic[..offset].to_vec(),
 					}
 				},
-				_ => ExtrinsicHeader { indexed_hash: Default::default(), data: extrinsic },
+				_ => ExtrinsicHeader { indexed_hash: None, data: extrinsic },
 			}
 		};
 		extrinsic_headers.push(extrinsic_header);
@@ -3141,6 +3198,49 @@ pub(crate) mod tests {
 		assert_eq!(None, bc.body(BlockId::hash(blocks[2])).unwrap());
 		assert_eq!(Some(vec![3.into()]), bc.body(BlockId::hash(blocks[3])).unwrap());
 		assert_eq!(Some(vec![4.into()]), bc.body(BlockId::hash(blocks[4])).unwrap());
+	}
+
+	#[test]
+	fn indexed_data_block_body() {
+		let backend =
+			Backend::<Block>::new_test_with_tx_storage(1, 10, TransactionStorageMode::BlockBody);
+
+		let x0 = ExtrinsicWrapper::from(0u64).encode();
+		let x1 = ExtrinsicWrapper::from(1u64).encode();
+		let x0_hash = <HashFor<Block> as sp_core::Hasher>::hash(&x0[1..]);
+		let x1_hash = <HashFor<Block> as sp_core::Hasher>::hash(&x1[1..]);
+		let index = vec![
+			IndexOperation::Insert {
+				extrinsic: 0,
+				hash: x0_hash.as_ref().to_vec(),
+				size: (x0.len() - 1) as u32,
+			},
+			IndexOperation::Insert {
+				extrinsic: 1,
+				hash: x1_hash.as_ref().to_vec(),
+				size: (x1.len() - 1) as u32,
+			},
+		];
+		let hash = insert_block(
+			&backend,
+			0,
+			Default::default(),
+			None,
+			Default::default(),
+			vec![0u64.into(), 1u64.into()],
+			Some(index),
+		)
+		.unwrap();
+		let bc = backend.blockchain();
+		assert_eq!(bc.indexed_transaction(&x0_hash).unwrap().unwrap(), &x0[1..]);
+		assert_eq!(bc.indexed_transaction(&x1_hash).unwrap().unwrap(), &x1[1..]);
+
+		// Push one more blocks and make sure block is pruned and transaction index is cleared.
+		insert_block(&backend, 1, hash, None, Default::default(), vec![], None).unwrap();
+		backend.finalize_block(BlockId::Number(1), None).unwrap();
+		assert_eq!(bc.body(BlockId::Number(0)).unwrap(), None);
+		assert_eq!(bc.indexed_transaction(&x0_hash).unwrap(), None);
+		assert_eq!(bc.indexed_transaction(&x1_hash).unwrap(), None);
 	}
 
 	#[test]

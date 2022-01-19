@@ -493,6 +493,26 @@ pub mod pallet {
 			Self::deposit_event(Event::Remarked { sender: who, hash });
 			Ok(().into())
 		}
+
+		/// Make some on-chain remark and emit event.
+		///
+		/// # <weight>
+		/// - `O(b)` where b is the length of the remark.
+		/// - 1 event.
+		/// # </weight>
+		#[pallet::weight(T::SystemWeightInfo::remark_with_event(remark.len() as u32))]
+		//#[pallet::weight(T::SystemWeightInfo::remark_with_index(remark.len() as u32))]
+		pub fn remark_with_index(
+			origin: OriginFor<T>,
+			remark: Vec<u8>,
+		) -> DispatchResultWithPostInfo {
+			ensure_signed(origin)?;
+			let content_hash = sp_io::hashing::blake2_256(&remark);
+			let extrinsic_index = <frame_system::Pallet<T>>::extrinsic_index()
+				.ok_or_else(|| Error::<T>::BadContext)?;
+			sp_io::transaction_index::index(extrinsic_index, remark.len() as u32, content_hash);
+			Ok(().into())
+		}
 	}
 
 	/// Event for the System pallet.
@@ -535,6 +555,8 @@ pub mod pallet {
 		NonZeroRefCount,
 		/// The origin filter prevent the call to be dispatched.
 		CallFiltered,
+		/// Attempted to call `remark_with_index` outside of block execution.
+		BadContext,
 	}
 
 	/// Exposed trait-generic origin type.
