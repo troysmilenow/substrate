@@ -500,8 +500,7 @@ pub mod pallet {
 		/// - `O(b)` where b is the length of the remark.
 		/// - 1 event.
 		/// # </weight>
-		#[pallet::weight(T::SystemWeightInfo::remark_with_event(remark.len() as u32))]
-		//#[pallet::weight(T::SystemWeightInfo::remark_with_index(remark.len() as u32))]
+		#[pallet::weight(T::SystemWeightInfo::remark_with_index(remark.len() as u32))]
 		pub fn remark_with_index(
 			origin: OriginFor<T>,
 			remark: Vec<u8>,
