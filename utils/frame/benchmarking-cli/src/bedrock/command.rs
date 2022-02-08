@@ -17,7 +17,7 @@ use sc_cli::{CliConfiguration, DatabaseParams, ExecutionStrategy, Result, Shared
 use sc_client_api::{blockchain::Backend as BlockchainBackend, Backend, UsageProvider};
 use sc_client_db::{utils::{read_meta, open_database, DatabaseType}, Database, DbHash, BenchmarkingState, DatabaseSource, columns};
 use sc_executor::NativeElseWasmExecutor;
-use sc_service::{chain_ops::revert_chain, Configuration, NativeExecutionDispatch};
+use sc_service::{chain_ops::revert_chain, PartialComponents, Configuration, NativeExecutionDispatch};
 use sp_core::offchain::{
 	testing::{TestOffchainExt, TestTransactionPoolExt},
 	OffchainDbExt, OffchainWorkerExt, TransactionPoolExt,
@@ -41,20 +41,29 @@ impl BedrockCmd {
 		ExecDispatch: NativeExecutionDispatch + 'static,
 	{
 		match self.bedrock_type {
-			BedrockType::BlockImport => self.block_import(),
-			BedrockType::DbRead => self.db_read(&config),
+			BedrockType::BlockImport => self.block_import::<BB>(&config),
+			BedrockType::DbRead => self.db_read::<BB>(&config),
 			BedrockType::DbWrite => self.db_write::<BB>(&config),
 			BedrockType::TxExecution => self.tx_execution(),
 		}
 	}
 
-	fn block_import(&self) -> Result<()> {
-		// import_single_block
-		unimplemented!();
+	fn block_import<BB>(&self, config: &Configuration) -> Result<()>
+	where
+		BB: BlockT,
+	{
+		let db = setup_db::<BB>(&config)?;
+		//benches::block_import(&self.bedrock_params, *config.clone(), db);
+		Ok(())
 	}
 
-	fn db_read(&self, config: &Configuration) -> Result<()> {
-		unimplemented!();
+	fn db_read<BB>(&self, config: &Configuration) -> Result<()>
+	where
+		BB: BlockT,
+	{
+		let db = setup_db::<BB>(&config)?;
+		benches::db_write(&self.bedrock_params, db);
+		Ok(())
 	}
 
 	fn db_write<BB>(&self, config: &Configuration) -> Result<()>
@@ -62,7 +71,7 @@ impl BedrockCmd {
 		BB: BlockT,
 	{
 		let db = setup_db::<BB>(&config)?;
-		benches::db_write(&self.bedrock_params, db.as_ref());
+		benches::db_write(&self.bedrock_params, db);
 		Ok(())
 	}
 
@@ -94,6 +103,9 @@ fn setup_db<BB>(config: &Configuration) -> Result<Arc<DB>>
 		transaction_storage: config.transaction_storage.clone(),
 	};
 	info!("Loading {}...", db_config.source);
+	if db_config.source.path().is_some() {
+		info!("Db path = {}", db_config.source.path().unwrap().display());
+	}
 
 	let db = open_database::<BB>(&db_config, DatabaseType::Full).map_err(|e|  sc_cli::Error::Input("TODO".to_string()))?;
 	let meta = read_meta::<BB>(&*db, columns::HEADER)?;
