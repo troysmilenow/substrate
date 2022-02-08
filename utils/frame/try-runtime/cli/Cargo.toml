@@ -15,7 +15,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 [dependencies]
 clap = { version = "3.0", features = ["derive"] }
 log = "0.4.8"
-parity-scale-codec = { version = "2.3.1" }
+parity-scale-codec = { version = "3" }
 serde = "1.0.132"
 zstd = "0.9.0"
 

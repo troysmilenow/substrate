@@ -1852,7 +1852,7 @@ mod tests {
 	fn contract_decode_length_ignored() {
 		let mut mock_ext = MockExt::default();
 		let result = execute(CODE_DECODE_FAILURE, vec![], &mut mock_ext);
-		// AccountID implements `MaxEncodeLen` and therefore the supplied length is
+		// AccountID implements `MaxEncodedLen` and therefore the supplied length is
 		// no longer needed nor used to determine how much is read from contract memory.
 		assert_ok!(result);
 	}
